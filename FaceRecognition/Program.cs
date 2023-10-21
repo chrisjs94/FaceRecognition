@@ -5,13 +5,12 @@ using Emgu.CV.Face;
 using Emgu.CV.Structure;
 using Emgu.CV.Util;
 using FaceRecognition.Model;
-using System.ComponentModel;
+using Microsoft.Win32;
 using System.Data;
 using System.Data.SqlClient;
+using System.Diagnostics;
 using System.Drawing;
-using System.Drawing.Imaging;
-using System.Linq;
-using System.Reflection;
+using static System.Windows.Forms.VisualStyles.VisualStyleElement;
 
 List<FaceData> faceList;
 VectorOfMat imageList = new VectorOfMat();
@@ -19,9 +18,51 @@ VectorOfInt labelList = new VectorOfInt();
 //CascadeClassifier? haarCascade = null;
 CascadeClassifier? faceClassifier = null;
 EigenFaceRecognizer? recognizer = null;
+Rectangle[]? faces = null;
 
-Console.WriteLine("Testin face recognition");
-FaceRecognition(Path.Combine(Directory.GetCurrentDirectory(), @"Images\image.jpg"));
+Console.WriteLine("Testing face recognition");
+initialize(Path.Combine(Directory.GetCurrentDirectory(), @"Images\image.jpg"));
+
+Registro FetchDBImage(string dni)
+{
+    if (string.IsNullOrEmpty(dni))
+        throw new ArgumentNullException("dni is null");
+
+    string connectionString = "Data Source=localhost;Initial Catalog=dbFotos;Integrated Security=True";
+    using (SqlConnection connection = new SqlConnection(connectionString))
+    {
+        try
+        {
+            Registro registro = new Registro();
+            connection.Open();
+
+            string query = $"SELECT cedula, Foto FROM Fotos WHERE cedula = '" + dni + "';";
+            SqlCommand command = new SqlCommand(query, connection);
+            SqlDataReader reader = command.ExecuteReader();
+
+            while (reader.Read())
+            {
+                string cedula = reader["cedula"].ToString();
+                string imagenBase64 = reader["Foto"].ToString();
+
+                registro = new Registro
+                {
+                    Cedula = cedula,
+                    ImagenBase64 = imagenBase64
+                };
+            }
+
+            reader.Close();
+
+            return registro;
+        }
+        catch (Exception ex)
+        {
+            // Manejar la excepción según tus necesidades
+            throw;
+        }
+    }
+}
 
 List<Registro> FetchDB(int page, int take)
 {
@@ -105,7 +146,7 @@ void GetFacesList(int page, int take)
         imageList.Push(face.FaceImage.Mat);
         labelList.Push(new[] { i++ });
     }
-    
+
     recognizer = new EigenFaceRecognizer(labelList.Size);
 
     // Train recogniser
@@ -113,48 +154,80 @@ void GetFacesList(int page, int take)
         recognizer.Train(imageList, labelList);
 }
 
-void FaceRecognition(string imagePath, int page = 1, int take = 100)
+void initialize(string imagePath)
+{
+    Image<Bgr, byte> emguImage = new Image<Bgr, byte>(imagePath);
+    if (faces == null)
+        faces = detectFacesInImage(emguImage);
+
+    if (faces.Length == 0)
+    {
+        Console.WriteLine("No se han detectado rostros en tu imagen");
+        return;
+    }
+
+    int count = 1, selectedIndex = 0;
+    foreach (var face in faces)
+    {
+        Console.WriteLine("Se ha detectado un rostro. Presiona " + count + " para procesar esta imagen.");
+        count++;
+    }
+
+    selectedIndex = int.Parse(Console.ReadLine() ?? "0");
+    var detectedFace = emguImage
+                .Copy(faces[selectedIndex - 1])
+                .Convert<Gray, byte>()
+                .Resize(128, 150, Inter.Cubic);
+
+    if (detectedFace != null)
+    {
+        string imageName = @"Images\" + Guid.NewGuid() + ".png";
+        emguImage.Draw(faces[selectedIndex - 1], new Bgr(255, 255, 0), 2);
+        emguImage.Save(Path.Combine(Directory.GetCurrentDirectory(), imageName));
+
+        Process.Start(Directory.GetCurrentDirectory() + @"\ImageViewer.exe", "Image " + imageName);
+
+        FaceRecognition(detectedFace);
+    }
+
+    Console.WriteLine("Fin del programa");
+}
+
+void FaceRecognition(Image<Gray, byte> emguImage, int page = 1, int take = 100)
 {
     GetFacesList(page, take);
+    double umbralDistancia = 4000;
 
     if (imageList.Size != 0)
     {
-        Image<Bgr, byte> emguImage = new Image<Bgr, byte>(imagePath);
+        MCvTermCriteria termCrit = new MCvTermCriteria(faceList.Count, 0.001);
 
-        var faces = detectFacesInImage(emguImage);
-        double umbralDistancia = 5000;
+        //Eigen Face Algorithm
+        FaceRecognizer.PredictionResult result = (recognizer ?? throw new ArgumentNullException("No se ha encontrado Recognizer"))
+            .Predict(emguImage);
 
-        foreach (var face in faces)
+        if (result.Distance == -1)
+            Console.WriteLine("Unknown");
+        else if (result.Distance < umbralDistancia)
         {
-            var detectedFace = emguImage.Copy(face).Convert<Gray, byte>().Resize(128, 150, Inter.Cubic);
-            if (detectedFace != null)
+            try
             {
-                emguImage.Draw(face, new Bgr(255, 255, 0), 2);
-                emguImage.Save(Path.Combine(Directory.GetCurrentDirectory(), @"Images\" + Guid.NewGuid() + ".png"));
-
-                MCvTermCriteria termCrit = new MCvTermCriteria(faceList.Count, 0.001);
-
-                //Eigen Face Algorithm
-                FaceRecognizer.PredictionResult result = (recognizer ?? throw new ArgumentNullException("No se ha encontrado Recognizer"))
-                    .Predict(detectedFace);
-
-                if (result.Distance == -1)
-                {
-                    Console.WriteLine("Unknown");
-                    Console.WriteLine("Fin");
-                }
-                else if (result.Distance < umbralDistancia)
-                {
-                    Console.WriteLine(faceList[result.Label].PersonName);
-                    Console.WriteLine("Fin");
-                }
-                else
-                {
-                    Console.WriteLine(result.Distance.ToString());
-                    FaceRecognition(imagePath, page + 1, take);
-                }
+                Process.Start(Directory.GetCurrentDirectory() + @"\ImageViewer.exe", "Base64 " + FetchDBImage(faceList[result.Label].PersonName).ImagenBase64);
+                Console.WriteLine(faceList[result.Label].PersonName);
             }
-            break;
+            catch { }
+        }
+        else
+        {
+            try
+            {
+                if (result.Distance < 5000)
+                    Process.Start(Directory.GetCurrentDirectory() + @"\ImageViewer.exe", "Base64 " + FetchDBImage(faceList[result.Label].PersonName).ImagenBase64);
+            }
+            catch { }
+
+            Console.WriteLine(result.Distance.ToString());
+            FaceRecognition(emguImage, page + 1);
         }
     }
     else
